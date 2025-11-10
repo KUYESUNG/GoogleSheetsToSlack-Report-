@@ -1,0 +1,149 @@
+// 스프레드시트 ID 가져오기
+function getSpreadsheetId_() {
+  const id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if (!id) {
+    throw new Error('SPREADSHEET_ID가 설정되어 있지 않습니다. setSpreadsheetIdOnce()를 먼저 실행하세요.');
+  }
+  return id;
+}
+
+// Slack Webhook URL 가져오기
+function getSlackWebhookUrl_() {
+  const url = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
+  if (!url) {
+    throw new Error('SLACK_WEBHOOK_URL이 설정되어 있지 않습니다. setWebhookUrlOnce()를 먼저 실행하세요.');
+  }
+  return url;
+}
+
+/***********************
+ * 💬 Slack 메시지 전송
+ ***********************/
+
+function sendSlackMessage(text) {
+  const safeText = (text == null) ? '' : String(text).trim();
+  const finalText = safeText || '알림: 내용이 비어 있습니다.';
+
+  const url = getSlackWebhookUrl_();
+  const payload = { text: finalText };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  };
+
+  const res = UrlFetchApp.fetch(url, options);
+}
+
+/***********************
+ * 📊 Summary 보고 기능
+ ***********************/
+
+function reportSummaryToSlack() {
+  const sheet = SpreadsheetApp.openById(getSpreadsheetId_()).getSheets()[0]; // 첫 번째 시트 = Summary
+
+  let row = 18;
+  const rows = [];
+
+  // ✅ Summary 데이터 수집
+  while (true) {
+    const name = sheet.getRange(`B${row}`).getValue();
+    if (!name) break;
+
+    const rowValues = sheet.getRange(`B${row}:H${row}`).getValues()[0];
+    rows.push(rowValues);
+
+    if (name.toString().trim().toLowerCase() === 'total') break;
+    row++;
+  }
+
+  if (rows.length === 0) {
+    sendSlackMessage('Summary 시트에 데이터가 없습니다.');
+    return;
+  }
+
+  // ✅ Total 이후 1행 건너뛰어 "Test Case Performance Rate"와 "Test Success Rate" 가져오기
+  const perfLabel = sheet.getRange(`B${row + 2}`).getValue();
+  const perfValueRaw = sheet.getRange(`C${row + 2}`).getValue();
+  const successLabel = sheet.getRange(`B${row + 3}`).getValue();
+  const successValueRaw = sheet.getRange(`C${row + 3}`).getValue();
+
+  // ✅ 퍼센트 값으로 변환 (0~1이면 100 곱하기)
+  const perfValue =
+    typeof perfValueRaw === 'number'
+      ? Math.round(perfValueRaw * 100) + '%'
+      : String(perfValueRaw);
+  const successValue =
+    typeof successValueRaw === 'number'
+      ? Math.round(successValueRaw * 100) + '%'
+      : String(successValueRaw);
+
+  // 표 헤더
+  const headerRow = ['', 'Pass', 'Fail', 'N/A', 'Block', 'NotTest', '진행률'];
+  const allRows = [headerRow, ...rows.map(formatRowValues)];
+
+  // 열 폭 고정 (각 열 최대 길이에 맞춰 정렬)
+  const colWidths = getColumnWidths(allRows);
+  const tableLines = allRows.map(r => formatRowAligned(r, colWidths));
+
+  // ✅ 하단에 요약 추가
+  const footerLines = [
+    '',
+    `📈 ${perfLabel}: ${perfValue}`,
+    `✅ ${successLabel}: ${successValue}`,
+  ];
+
+  // Slack에서 보기 좋게 코드 블록(```)으로 감싸기
+  const message =
+    '*🧾 테스트 진행 현황 (Summary)*\n```' +
+    tableLines.join('\n') +
+    '\n' +
+    footerLines.join('\n') +
+    '\n```';
+
+  sendSlackMessage(message);
+}
+
+/***********************
+ * 🧮 Helper Functions
+ ***********************/
+
+// 진행률 퍼센트 변환
+function formatRowValues(rowValues) {
+  const [sheetName, pass, fail, na, block, notTest, progress] = rowValues;
+  const percent =
+    typeof progress === 'number'
+      ? Math.round(progress * 100)
+      : parseFloat(progress) || 0;
+  return [
+    sheetName.toString(),
+    pass,
+    fail,
+    na,
+    block,
+    notTest,
+    percent + '%',
+  ];
+}
+
+// 각 열의 최대 길이를 구해서 정렬에 사용
+function getColumnWidths(rows) {
+  const widths = new Array(rows[0].length).fill(0);
+  rows.forEach(row => {
+    row.forEach((cell, i) => {
+      const len = String(cell).length;
+      if (len > widths[i]) widths[i] = len;
+    });
+  });
+  return widths;
+}
+
+// 열 폭에 맞춰서 칸 정렬 (좌측 정렬)
+function formatRowAligned(row, colWidths) {
+  return row
+    .map((cell, i) => String(cell).padEnd(colWidths[i] + 2))
+    .join('');
+}
+
